@@ -1,0 +1,271 @@
+---
+title: "Regression Project"
+author: "Jared Richardson, Binoy Mathai"
+date: "2025-04-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+We will begin by looking at the raw UAV and agronomic data for the 2021 growing season. Initially, we will run a naive model to assess variables and potential avenues for model improvement. Additionally, we will look at the diagnostics for the naive model and ensure assumptions. The data set includes mainly three variable types, that is argonomic, UAV, and thermal features. The structure of the data set follows that of a random block design experiment (Farag et. al., 2024). Additionally, most variables with the exception of replicate and rice cultivar are to be continous variables. Moreover, to help with redundant angle captures we choose to use the "90" degree angles associated variables, as it will be assumed that an orthogonal capture will have less shadow and be a more direct capture of wavelengths.
+```{r, message=FALSE, warning=FALSE}
+# Utilizing dplyr package for preprocessing
+library(dplyr)
+# This package allows collabortion usuing Google Drive for .Rmd files
+library(trackdown)
+
+# Load intial dataset
+dat <- read.csv("../Data/Dataset_2021.csv", header = TRUE)
+
+rice_data <- dat %>%
+  mutate(across(c("Plot_Number", "Rice_Cultivar", "Experiment_Name", "Bay_Length", "Replicate"), as.factor)) %>% #
+  dplyr::select(-ends_with(c("_0", "_25", "_45", "_135", "_50"))) %>% # We'll also start by removing different angle captures (_50 is for heading date). In future may just aggregate to an average
+  dplyr::select(-c("Leaf1_Temp", "Leaf2_Temp", "Final_Lodge", "Percent_Lodge", "Percent_Stand", "SPAD", "Bay_Length", "Date")) %>% # We'll also drop apparently (not entirely) empty columns, including extra information. 
+  na.omit()
+```
+
+We will begin with the preprocessed dataset that has been manipulated to remove empty rows and columns and extra redundant measurements. Now to start, we will begin my looking at the relationship between predictor variables and the response.
+```{r}
+library(GGally)
+library(ggplot2)
+colnames(rice_data) # Start with the list of column names
+
+yield_var <- "Yield" 
+# Select predictors (numeric columns excluding Yield)
+numeric_vars <- rice_data %>% dplyr::select(where(is.numeric))
+predictors <- setdiff(names(numeric_vars), yield_var)
+
+# Create a full scatterplot matrix
+scatter_plot <- ggpairs(numeric_vars,
+                        lower = list(continuous = "points"), # show scatterplots
+                        diag = list(continuous = "densityDiag"), # show densities on diagonal
+                        upper = list(continuous = "cor"),
+                        progress = FALSE) # show correlations in upper panel
+#scatter_plot # Default off since takes a while to load
+ggsave("full_scatterplot_matrix.pdf", scatter_plot, width = 20, height = 20)
+
+# Calculate correlations
+correlations <- sapply(predictors, function(pred) {
+  cor(rice_data[[pred]], rice_data[[yield_var]], use = "complete.obs")
+})
+
+# Make into a data frame
+correlation_df <- data.frame(
+  Predictor = predictors,
+  Correlation_with_Yield = correlations
+)
+
+# Arrange from strongest to weakest
+correlation_df <- correlation_df %>%
+  mutate(Abs_Correlation = abs(Correlation_with_Yield)) %>%
+  arrange(desc(Abs_Correlation))
+
+# View correlations
+print(correlation_df)
+write.csv(correlation_df, file = "correlation_df.csv")
+```
+From the previous output we can conclude that the individual predictors on their own do not explain much of the variation in yield. Moreover, a cursory look at the linear correlation between yield and predictors indicates that they are not linearly related, hinting at future need of transformation. For now, we will now proceed with the construction of a naive multiple linear regression model.
+```{r}
+# Starting with the complete full model
+################## Experiment name ###########################
+full_model <- lm(Yield ~ Rice_Cultivar + Replicate + Nitrogen_Rate + Heading_100 + Thermal + NDWI + EVI + NAVI + GNDVI + Cigreen + RENDVI + TGI + SAVI + CI_RedEdge + BI + SCI + GLI + NGRDI + SI + VARI + HUE + BGI + PSRI + RVI + TVI + CVI + NGRDI + NDVI + DVI + NRCT + Vegetation_Fraction + contrast_90 + dissimilarity_90 + homogeneity_90 + ASM_90 + energy_90 + correlation_90, data = rice_data)
+
+# Summary for complete model
+summary(full_model)
+par(mfrow = c(2, 2))
+plot(full_model)
+```
+
+```{r}
+# Quick check for linearity between predictors and yield
+library(car)
+avPlots(full_model)
+```
+
+Lets now take some time to look at the performance of the naive model. From the summary model performance is not egregious with a standard residual error close to one (1.075) and an adjusted R-squared value of 90.8%. Additionally, we can see that our model is significant per the p-value. That said, there is certainly some needed investigation on the variables used since out the thirty-five parameters only twenty-one were deemed significant. To investigate a better model lets start by finding appropriate transformations for the already used variables. Then we'll explore points that more influential and remove potential outliers. Afterwards, we'll try to find a safe subset size for choosing a number of variables. Finally, to keep as much information as possible from the predictors, we'll attempt a few differing model types such as LASSO and basic multilayer perception. Before that, we also observe that two predictors (GNDVI and NGRDI) produced coefficients with NA values. These are perfectly colinear which will cause issues with later variation inflation factor computation when attempting to reduce the full model, though we will confirm this in later steps. \hfill \break
+\newline
+To start, lets try to find some transformations to better ensure that the relationship between yield and our predictors are linear to ensure proper model assumptions. To do this we'll utilize the Box-Cox transformation function
+```{r}
+# Utilizing MASS library for Box-Cox procedure
+library(MASS)
+bc <- boxcox(Yield ~ 1, data = rice_data)
+# Check the distribution of yield after Box-Cox transformation
+par(mfrow = c(1, 2))
+hist(rice_data$Yield, main = "Yield", xlab = "Yield", breaks = 20)
+hist(log(rice_data$Yield), main = "Log(Yield)", xlab = "log(Yield)", breaks = 20)
+
+######################### Dropped GNDVI and NGRDI ##############################
+transformed_model <- lm(log(Yield) ~ Rice_Cultivar + Replicate + Nitrogen_Rate + Heading_100 + Thermal + NDWI + EVI + NAVI + Cigreen + RENDVI + TGI + SAVI + CI_RedEdge + BI + SCI + GLI + SI + VARI + HUE + BGI + PSRI + RVI + TVI + CVI + NDVI + DVI + NRCT + Vegetation_Fraction + contrast_90 + dissimilarity_90 + homogeneity_90 + ASM_90 + energy_90 + correlation_90, data = rice_data)
+
+summary(transformed_model)
+par(mfrow = c(2, 2))
+plot(transformed_model)
+
+```
+
+Initially, it appears that not much has changed; however, just from one simple transformation to normalize our response (yield) resulted in a 10-fold decrease in our residual error (from 1.173 to 0.1091). We chose this transformation based on the Box-Cox procedure which was maximized at a power transformation of zero. This makes our current model much more meaningful and easy to interpret, as it better satisfies the assumptions of linear regression and provides more reliable coefficient estimates. To better improve our model we will now investigate individual points and predictors to assess influential points and collinearity. This will allow us to narrow down meaningful predictors to further address linearity among variables.
+```{r}
+avPlots(transformed_model)
+```
+
+```{r}
+# Use base R for Cook's distance value
+par(mfrow = c(1, 1))
+plot(transformed_model, which = 4)
+#which(cooks.distance(transformed_model) > 4 / nrow(rice_data))
+
+# Compute variance inflation factor 
+vif_vals <- vif(transformed_model)
+
+vif_df <- as.data.frame(vif_vals)
+vif_df$Variable <- rownames(vif_df)
+
+# Use GVIF^(1/(2*Df)) for filtering
+vif_df <- vif_df %>%
+  mutate(Adj_GVIF = `GVIF^(1/(2*Df))`) %>%
+  filter(Adj_GVIF > 5) %>%
+  arrange(desc(Adj_GVIF))
+high_vif_vars <- vif_df$Variable
+high_vif_vars
+
+rice_data_clean <- rice_data %>% dplyr::select(-all_of(high_vif_vars))
+names(rice_data_clean)
+
+# Trying the newly reduced model
+transformed_reduced_model <- lm(log(Yield) ~ Rice_Cultivar + Nitrogen_Rate + Replicate + Thermal + GNDVI + NGRDI + NRCT + ASM_90 + energy_90 + correlation_90, data = rice_data_clean)
+
+summary(transformed_reduced_model)
+par(mfrow = c(2, 2))
+plot(transformed_reduced_model)
+```
+
+To address multicollinearity in the full model, we calculated variance inflation factors (VIF). Many vegetation indices (VIs) exhibited extreme collinearity, with VIF values well exceeding the standard threshold five in some cases. These VIs often share similar formulations and band ratios (e.g., NDVI, SAVI, VARI), making their joint modeling redundant. We removed the most collinear indices and retained a biologically diverse subset, including greenness-related indices (GNDVI, NGRDI), thermal contrast measures (NRCT), and texture-based features derived from gray-level co-occurrence matrices (ASM_90, energy_90, correlation_90), which together capture physiological status, canopy structure, and spatial reflectance variation.. This allowed us to preserve the interpretability and diversity of remote sensing features while ensuring model stability. Additionally, checking model metrics after predictor removal verifies that there is no loss in information, and likewise a slight improvement of our R-squared value. After removing collinear predictors and removing influential data points, we now use subset selection to refine our model and further reduce it's dimensionality. Moreover, since we have a smaller working set of variables we now will take an oppurtunity to see if any transformations of the predictors would be necessary. To do this we will quickly look at the added variable plots. \hfill \break
+```{r}
+avPlots(transformed_reduced_model)
+```
+
+```{r, warning=FALSE} 
+library(leaps)
+library(caret)
+
+models <- regsubsets(log(Yield) ~ Nitrogen_Rate + Replicate + Thermal + GNDVI + NGRDI + NRCT + ASM_90 + energy_90 + correlation_90, data = rice_data_clean, nvmax = 15, method = "forward") # Dropped cultivar to restrict to numeric predictors
+models_df <- summary(models)
+#models_df
+par(mfrow = c(1, 2))
+plot(1:11, models_df$adjr2, xlab = "Subset Size", ylab = "Adjusted R-squared")
+
+# Secondary Plot
+subsets(models, statistic = c("adjr2"), legend = T)
+
+plot(models, scale = "adjr2")
+plot(models, scale = "Cp")
+plot(models, scale = "bic")
+
+res.sum <- summary(models)
+data.frame(
+  Adj.R2 = which.max(res.sum$adjr2),
+  CP = which.min(res.sum$cp),
+  BIC = which.min(res.sum$bic)
+)
+
+```
+
+Using a forward stepwise selection method, we see that we can definitely reduce our model. Per the final data frame, we can see that we maximize R-square with the full numeric model; however, AIC and BIC metrics conclude the models that best explain data while minimizing complexity hover closer to fifteen and sixteen predictors. Hence, since we do not see a major jump in explained variability for the full model we will continue further by dropping  variables leaving 15 variables.
+```{r}
+# Exhaustive search of subsets
+models2 <- regsubsets(log(Yield) ~ Nitrogen_Rate + Replicate + Thermal + GNDVI + NGRDI + NRCT + ASM_90 + energy_90 + correlation_90, data = rice_data_clean, nvmax = 11, method = "exhaustive", really.big = TRUE) # Dropped cultivar to restrict to numeric predictors
+
+summary_exh <- summary(models2)
+
+which.max(summary_exh$adjr2)
+
+# Get predictors for that model
+coef(models2, which.max(summary_exh$adjr2))
+```
+
+To further confirm, we also employ an exhaustive search of all possible subsets of variables. We can see that results resemble that of our stepwise analysis, indicating the balance between model complexity and performance is optimize at fifteen and sixteen variables.
+```{r}
+final_reduced_model <- lm(log(Yield) ~ Nitrogen_Rate + Replicate + Thermal + GNDVI + NGRDI + NRCT + energy_90 + correlation_90, data = rice_data_clean)
+summary(final_reduced_model)
+
+final_model <- lm(log(Yield) ~ Rice_Cultivar + Nitrogen_Rate + Replicate + Thermal + GNDVI + NGRDI + NRCT + energy_90 + correlation_90, data = rice_data_clean)
+summary(final_model)
+par(mfrow = c(2,2))
+plot(final_model)
+
+# Plot final model predicted vals v. acutal yield
+fmodel_preds <- exp(predict(final_model)) # Recall we applied log transformed earlier
+yield_vals <- rice_data_clean$Yield
+plot(yield_vals, fmodel_preds, xlab = "Actual Yield", ylab = "Predicted Yield", main = "Actual v. Predicted Yield")
+abline(0, 1)
+```
+
+LASSO Model: *Original mistake was not transforming all of yield data. This caused more variables to be dropped, which from the original feature was 39. Thus resulting in 11 variable LASSO model.
+```{r}
+library(glmnet)
+library(Metrics)
+set.seed(123) # Reproduceablity for DL comparison
+
+# Split data based on 80/20 split
+sample_sets <- sample(seq_len(nrow(rice_data)), size = 0.8 * nrow(rice_data)) # Select from rows 80%
+# Split the data and save statically for Deep Learning model
+training_dat <- rice_data[sample_sets, ]
+testing_dat <- rice_data[-sample_sets, ]
+# Transform yield
+training_dat$Yield <- log(training_dat$Yield)
+testing_dat$Yield <- log(testing_dat$Yield)
+write.csv(training_dat, "training_data.csv", row.names = FALSE)
+write.csv(testing_dat, "testing_data.csv", row.names = FALSE)
+
+# Set up full model and data to test on
+X_train <- model.matrix(Yield ~ Rice_Cultivar + Replicate + Nitrogen_Rate + Heading_100 + Thermal + NDWI + EVI + NAVI + GNDVI + Cigreen + RENDVI + TGI + SAVI + CI_RedEdge + BI + SCI + GLI + NGRDI + SI + VARI + HUE + BGI + PSRI + RVI + TVI + CVI + NDVI + DVI + NRCT + Vegetation_Fraction + contrast_90 + dissimilarity_90 + homogeneity_90 + ASM_90 + energy_90 + correlation_90, data = training_dat)[, -1]
+
+y_train <- training_dat$Yield
+# Model matrix for testing (analogous to training)
+X_test <- model.matrix(Yield ~ Rice_Cultivar + Replicate + Nitrogen_Rate + Heading_100 + Thermal + NDWI + EVI + NAVI + GNDVI + Cigreen + RENDVI + TGI + SAVI + CI_RedEdge + BI + SCI + GLI + NGRDI + SI + VARI + HUE + BGI + PSRI + RVI + TVI + CVI + NDVI + DVI + NRCT + Vegetation_Fraction + contrast_90 + dissimilarity_90 + homogeneity_90 + ASM_90 + energy_90 + correlation_90, data = testing_dat)[, -1]
+
+y_test <- testing_dat$Yield
+
+# Find appropriate lambda for LASSO
+fitted_lambda <- cv.glmnet(X_train, y_train, alpha = 1)
+# Fit LASSO
+lambda_val <- fitted_lambda$lambda.min
+lasso_model <- glmnet(X_train, y_train, alpha = 1, lambda = lambda_val)
+
+# Prediction on testing set
+pred_vals <- predict(lasso_model, s = lambda_val, newx = X_test)
+
+# Compute metrics for comparison
+sst <- sum((y_test - mean(y_test))^2)
+sse <- sum((y_test - pred_vals)^2)
+r_squared <- 1 - (sse / sst)
+# RSME value
+rsme_val <- rmse(y_test, pred_vals)
+
+# Output results
+cat("LASSO Regression Results:\n")
+cat("Best Lambda:", lambda_val, "\n")
+cat("R-squared:", round(r_squared, 4), "\n")
+cat("RSME:", round(rsme_val, 4), "\n")
+
+# Extract all coefficients (including zeros)
+lasso_coefs <- coef(lasso_model)
+
+# Convert to a data frame
+coef_df <- as.data.frame(as.matrix(lasso_coefs))
+# Add variable names
+coef_df$Variable <- rownames(coef_df)
+# Rename the coefficient column
+colnames(coef_df)[1] <- "Estimate"
+# Reorder columns
+coef_df <- coef_df[, c("Variable", "Estimate")]
+num_zero_coefs <- sum(coef_df$Estimate == 0 & coef_df$Variable != "(Intercept)")
+cat("Number of zero coefficients:", num_zero_coefs, "\n")
+# View full coefficient table
+print(coef_df)
+
+# Checking predicted v. actual values
+plot(y_test, pred_vals, xlab = "Actual Yield", ylab = "Predicted Yield", main = "Actual v. Predicted Yield")
+abline(0, 1)
+```
+
