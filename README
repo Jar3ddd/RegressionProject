@@ -1,0 +1,1 @@
+This repository is meant for reproducing results for the final project for Regression Analysis (Sp. 2025). The Python scripts may be run as is in the same directory structure. Data for the deep learning model is located in the /data subdirectory.
